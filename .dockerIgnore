@@ -1,0 +1,35 @@
+# Keeping .env out of the image is the important line in this file.
+# If a .env is baked into the image it will silently take precedence over
+# nothing, but it WILL confuse you badly when the container behaves
+# differently from what your Kubernetes ConfigMap and Secret say.
+.env
+.env.*
+!.env.example
+
+# Never ship dependencies built on a developer laptop; the image builds them.
+vendor/
+node_modules/
+
+# Build artefacts and local state
+storage/logs/*
+storage/framework/cache/*
+storage/framework/sessions/*
+storage/framework/views/*
+bootstrap/cache/*
+public/storage
+
+# Repository and tooling noise
+.git
+.gitignore
+.github
+.idea
+.vscode
+*.md
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+
+# Test output
+.phpunit.result.cache
+coverage/

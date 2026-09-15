@@ -1,4 +1,5 @@
 services:
+
   traefik:
     image: "traefik:v3.0"
     command:
@@ -13,8 +14,8 @@ services:
       - "8082:8082"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
+
   app:
-    # set container name app
     container_name: app
     build:
       context: .
@@ -22,20 +23,63 @@ services:
     ports:
       - "8081:80"
     environment:
-      APP_DEBUG: "true"
-      APP_ENV: "dev"
+      # --- Application -------------------------------------------------------
+      # production + debug off is what the cluster will run. Note that this
+      # means errors render a generic 500 page with no stack trace; see the
+      # dev override note at the bottom of this file when you need detail.
+      APP_ENV: "production"
+      APP_DEBUG: "false"
+
+      # SECRET. Plaintext here is fine for local development only. In the
+      # cluster this becomes a Sealed Secret, and you should generate a fresh
+      # key rather than reuse one that has lived in a Git repository.
       APP_KEY: "base64:DJYTvaRkEZ/YcQsX3TMpB0iCjgme2rhlIOus9A1hnj4="
+
+      # --- Logging -----------------------------------------------------------
+      # Without this, Laravel writes to storage/logs/laravel.log inside the
+      # container, where no log collector will ever find it. Loki reads pod
+      # stdout/stderr, so the app must log there instead.
+      LOG_CHANNEL: "stderr"
+
+      # --- Sessions ----------------------------------------------------------
+      # The default "file" driver stores sessions on local disk, so with
+      # multiple replicas on different nodes a user's session exists on
+      # exactly one pod. The cookie driver needs no table and no Redis, which
+      # makes it the cheapest way to satisfy the anti-affinity requirement.
+      SESSION_DRIVER: "cookie"
+
+      # --- Database ----------------------------------------------------------
+      # All four of these are secrets in the cluster, not ConfigMap values.
       DB_CONNECTION: mysql
       DB_HOST: db
       DB_PORT: 3306
       DB_DATABASE: app_database
       DB_USERNAME: app_user
       DB_PASSWORD: app_password
+
     depends_on:
-      - db
+      # The original file used a bare `depends_on: [db]`, which only waits for
+      # the container to START, not for MySQL to accept connections — hence
+      # the first-boot failures. These two conditions fix the ordering.
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+    # Mirrors the Kubernetes readiness probe you will write later. Deliberately
+    # a static file: a probe that touches the database marks every replica
+    # unready during a DB blip and takes the whole app offline.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/healthz.html"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.app.rule=HostRegexp(`.*`)"
+
   db:
     image: mysql:8.0
     restart: unless-stopped
@@ -48,10 +92,24 @@ services:
       MYSQL_TCP_PORT: 3306
     volumes:
       - db_data:/var/lib/mysql
-      - ./mysql-init:/docker-entrypoint-initdb.d  # Permet d'exécuter des scripts SQL initiaux
+      # The ./mysql-init bind mount from the original file has been removed:
+      # the directory was empty, so Docker created it silently and it did
+      # nothing. The schema comes from Laravel migrations (see the migrate
+      # service above), not from init SQL.
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       timeout: 5s
       retries: 10
+
 volumes:
   db_data:
+
+# -----------------------------------------------------------------------------
+# Debugging note
+#
+# With APP_DEBUG=false you get a bare 500 page on any error. To see the actual
+# exception while developing, run a one-off override rather than editing this
+# file, so the committed config stays production-shaped:
+#
+#   docker compose run --rm -e APP_DEBUG=true -e APP_ENV=local -p 8081:80 app
+# -----------------------------------------------------------------------------
