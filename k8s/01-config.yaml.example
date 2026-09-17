@@ -1,0 +1,63 @@
+# =============================================================================
+# ConfigMap — the non-sensitive half of what used to be the `environment:`
+# block in docker-compose.yml.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: sample-app
+  labels:
+    app.kubernetes.io/name: sample-app
+    app.kubernetes.io/component: config
+    app.kubernetes.io/part-of: kube-project
+data:
+  # Note every value is a STRING. YAML would read `false` as a boolean and
+  # the API server rejects it, hence the quotes. Same for the port number.
+  APP_ENV: "production"
+  APP_DEBUG: "false"
+
+  LOG_CHANNEL: "stderr"
+  SESSION_DRIVER: "cookie"
+
+  DB_CONNECTION: "mysql"
+  # This is the name of the Service defined in 02-mysql.yaml. Kubernetes runs
+  # an internal DNS server, so "mysql" resolves to that Service from any pod
+  # in this namespace. It is the direct equivalent of compose resolving
+  # container names for you.
+  DB_HOST: "mysql"
+  DB_PORT: "3306"
+  DB_DATABASE: "app_database"
+
+---
+# =============================================================================
+# Secret — the sensitive half.
+#
+# IMPORTANT: a Secret is base64-encoded, NOT encrypted. Anyone who can read
+# this object in the cluster can read the values. It is still better than a
+# ConfigMap (it is excluded from some logs and can be RBAC-restricted
+# separately), but it is not protection.
+#
+# This is exactly why your project requires Sealed Secrets: that tool encrypts
+# a Secret so only the cluster holding the private key can decrypt it, which
+# makes the encrypted form safe to commit to Git. THIS file, as written, must
+# never be committed.
+#
+# `stringData` lets you write plain values and have Kubernetes do the base64
+# encoding. The alternative, `data`, requires you to encode by hand.
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secrets
+  namespace: sample-app
+  labels:
+    app.kubernetes.io/name: sample-app
+    app.kubernetes.io/component: config
+    app.kubernetes.io/part-of: kube-project
+type: Opaque
+stringData:
+  APP_KEY: "base64:REPLACE"
+  DB_USERNAME: "REPLACE"
+  DB_PASSWORD: "REPLACE"
+  MYSQL_ROOT_PASSWORD: "REPLACE"

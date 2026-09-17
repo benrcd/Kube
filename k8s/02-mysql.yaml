@@ -1,0 +1,182 @@
+# =============================================================================
+# PersistentVolumeClaim — a request for disk.
+#
+# This replaces the `db_data:` named volume from docker-compose.yml. You ask
+# for 2Gi that survives pod restarts; the cluster finds it. On kind that means
+# a directory on the node, provided by the built-in local-path provisioner.
+# On AWS the same manifest will be satisfied by EFS instead — the claim does
+# not change, only the StorageClass behind it does. That portability is the
+# whole point of the PV/PVC split.
+#
+# accessModes ReadWriteOnce = "one node may mount this read-write". Fine for
+# a single database pod; it is also why the Deployment below uses the
+# Recreate strategy.
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-data
+  namespace: sample-app
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: kube-project
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+
+---
+# =============================================================================
+# Deployment — manages the MySQL pod.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: sample-app
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: kube-project
+spec:
+  replicas: 1
+
+  # Recreate = kill the old pod BEFORE starting the new one. The default
+  # (RollingUpdate) would try to run two pods at once, and the second could
+  # never mount a ReadWriteOnce volume already held by the first. It would sit
+  # in Pending forever. The app Deployment can use RollingUpdate precisely
+  # because it has no volume.
+  strategy:
+    type: Recreate
+
+  # THE SELECTOR. This is how the Deployment knows which pods are "its own",
+  # and it must match the pod template labels below. Mismatch here is the most
+  # common beginner failure and produces no error — things just silently do
+  # nothing. Note it is immutable: to change it you must delete and recreate
+  # the Deployment.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: kube-project
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          args:
+            - "--default-authentication-plugin=mysql_native_password"
+
+          ports:
+            - name: mysql
+              containerPort: 3306
+
+          # Two ways to inject configuration, shown side by side.
+          #
+          # Here, `valueFrom` picks individual keys and renames them, because
+          # the MySQL image wants MYSQL_USER while our config calls it
+          # DB_USERNAME. The app Deployment uses the simpler `envFrom` to pull
+          # in every key at once. Use whichever fits.
+          env:
+            - name: MYSQL_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: DB_DATABASE
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_USERNAME
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_PASSWORD
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: MYSQL_ROOT_PASSWORD
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+
+          # Requests = what the scheduler reserves when deciding which node
+          # this fits on. Limits = the hard ceiling; exceed the memory limit
+          # and the kernel kills the container (OOMKilled).
+          #
+          # Your project REQUIRES these on every workload, and your admission
+          # policy in phase 5 will reject anything missing them.
+          resources:
+            requests:
+              cpu: "100m"        # 100 millicores = 0.1 of a CPU core
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
+          # Readiness gates traffic: until this passes, the Service will not
+          # send connections here. It is what makes the migration Job wait
+          # naturally rather than racing an unready database.
+          readinessProbe:
+            exec:
+              command: ["mysqladmin", "ping", "-h", "127.0.0.1"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+
+          # Liveness restarts a hung container. Give it a generous delay:
+          # MySQL's first boot initialises the data directory and is slow, and
+          # an impatient liveness probe will kill it mid-initialisation and
+          # loop forever.
+          livenessProbe:
+            exec:
+              command: ["mysqladmin", "ping", "-h", "127.0.0.1"]
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mysql-data
+
+---
+# =============================================================================
+# Service — a stable address for the database.
+#
+# Pods get a new IP every time they are recreated, so nothing ever addresses
+# a pod directly. This Service gives a fixed name: any pod in the namespace
+# can connect to the hostname "mysql" and reach whichever pod currently
+# matches the selector and passes its readiness probe.
+#
+# ClusterIP means internal-only, which is correct for a database.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: sample-app
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: kube-project
+spec:
+  type: ClusterIP
+  # This selector must match the POD labels above, not the Deployment's.
+  # A Service knows nothing about Deployments; it only sees pods.
+  selector:
+    app.kubernetes.io/name: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
