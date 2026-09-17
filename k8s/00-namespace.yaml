@@ -1,0 +1,10 @@
+# A Namespace is a folder. Everything else in these files lands inside it,
+# which keeps your resources from colliding with the cluster's own
+# (kube-system) and lets you delete the whole app with one command.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sample-app
+  labels:
+    app.kubernetes.io/name: sample-app
+    app.kubernetes.io/part-of: kube-project
